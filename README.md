@@ -1,97 +1,172 @@
 # MofonCode.Core
 
-Shared kernel for MofonCode .NET solutions: a minimal mediator, result and tracing primitives.
+A small shared kernel for .NET solutions built as vertical slices: a mediator with a behavior
+pipeline, `Result`-shaped handlers, and tracing that turns each handler into one span with its
+reasons attached.
 
-Targets `net10.0`. Published to [nuget.org](https://www.nuget.org/packages/MofonCode.Core) as `MofonCode.Core`.
+It is deliberately thin. It depends on FluentResults and two `Microsoft.Extensions.*.Abstractions`
+packages — no EF Core, no database client, no opinion about your domain.
+
+```
+dotnet add package MofonCode.Core
+```
+
+Requires **.NET 10**.
+
+## Quick start
+
+A request, its handler, and the registration that connects them:
+
+```csharp
+using FluentResults;
+using MofonCode.Core;
+using Microsoft.Extensions.DependencyInjection;
+
+// 1. A request names what it returns.
+public sealed record GetUser(int Id) : IRequest<User>;
+
+// 2. A handler returns a Result rather than throwing for expected failures.
+public sealed class GetUserHandler(IUserStore store) : IRequestHandler<GetUser, User>
+{
+    public async Task<Result<User>> Handle(GetUser request, CancellationToken cancellationToken)
+    {
+        User? user = await store.Find(request.Id, cancellationToken);
+
+        return user is null
+            ? Result.Fail<User>($"No user {request.Id}.")
+            : Result.Ok(user);
+    }
+}
+
+// 3. Register the mediator and the handler.
+services.AddSingleton<Mediator>();
+services.AddScoped<IRequestHandler<GetUser, User>, GetUserHandler>();
+```
+
+Then dispatch. Both type arguments are explicit — the request type and what it returns:
+
+```csharp
+Result<User> result = await mediator.Send<GetUser, User>(new GetUser(42), cancellationToken);
+
+if (result.IsFailed)
+    return Problem(result.ToErrorString());   // "No user 42."
+
+return Ok(result.Value);
+```
+
+Commands that produce no value use `ICommandRequest` and a one-argument `Send`:
+
+```csharp
+public sealed record DeactivateUser(int Id) : ICommandRequest;
+
+public sealed class DeactivateUserHandler : ICommandRequestHandler<DeactivateUser>
+{
+    public Task<Result> Handle(DeactivateUser request, CancellationToken cancellationToken) => ...;
+}
+
+Result result = await mediator.Send(new DeactivateUser(42), cancellationToken);
+```
+
+## Pipeline behaviors
+
+A behavior wraps every dispatch of the request it is registered for, in registration order.
+Validation, logging and retry belong here rather than in each handler:
+
+```csharp
+public sealed class ValidateUser(IValidator<GetUser> validator)
+    : IRequestBehavior<GetUser, User>
+{
+    public async Task<Result<User>> Handle(
+        GetUser request, Func<Task<Result<User>>> next, CancellationToken cancellationToken)
+    {
+        ValidationResult validation = await validator.ValidateAsync(request, cancellationToken);
+
+        // Short-circuit: the handler never runs.
+        return validation.IsValid
+            ? await next()
+            : Result.Fail<User>(validation.ToString());
+    }
+}
+
+services.AddScoped<IRequestBehavior<GetUser, User>, ValidateUser>();
+```
+
+## Tracing
+
+`TraceResult` wraps a unit of work in an `Activity`, records the reasons it collected, and emits
+logs and metrics once — on a terminal call, or on dispose if the work returned early or threw:
+
+```csharp
+services.AddTraceResultLogging();          // at registration
+serviceProvider.UseTraceResultLogging();   // once, at startup
+
+await using TraceResult<Report> trace = TraceResult<Report>.BeginHandler<GetReport>("build-report");
+
+trace.AddReason("cache miss").WithValue("key", cacheKey);
+trace.WithRecordCount(rows.Count)
+     .WithTag("tenant", tenantId);         // your own domain tags
+
+return trace.Ok(report);                   // or trace.Fail("...")
+```
+
+Failures carrying an exception are forwarded to whatever you register with
+`TraceResultFailureRegistry.Register`; domain failures — validation, not-found, permission —
+carry no exception and are deliberately not.
+
+## Specifications
+
+Composable predicates that a relational provider can translate, because they compose into a
+single lambda rather than an invocation tree:
+
+```csharp
+Expression<Func<Order, bool>> open = o => o.ClosedOn == null;
+Expression<Func<Order, bool>> large = o => o.Total > 1000m;
+
+var urgent = open.And(large);
+var stale  = open.And(large.Not());
+
+IQueryable<Order> matches = db.Orders.Where(urgent);
+```
+
+`All<T>()` matches everything, which gives a filter chain somewhere to start.
+
+## Concurrency
+
+```csharp
+// Run with a throttle the caller chooses, or the cross-cutting default.
+IEnumerable<Func<Task>> work = imports.Select(i => new Func<Task>(() => Import(i)));
+
+await Concurrency.RunThrottledAsync(work, maxConcurrent: 4);
+
+int batch = Concurrency.ChunkSize;   // scales with MaxDop, clamped to [100, 2000]
+```
+
+`HandlerLockRegistry` guards a handler that must not run twice at once in a process — a timer
+whose work can outlast its interval, say. `TryAcquire` returns `null` when someone else holds it,
+which the caller treats as "skip this run":
+
+```csharp
+using HandlerLockRegistry.LockToken? token = locks.TryAcquire("nightly-import");
+if (token is null) return Result.Ok();   // another run owns the work
+```
+
+It is single-process. Across instances, layer a distributed lock on top.
 
 ## What is in it
 
 | Area | Types |
 |---|---|
-| Mediator | `Mediator`, `IRequest<T>`, `IRequestHandler<,>`, `IRequestBehavior<,>`, and the `ICommandRequest*` equivalents for commands that return no value |
-| Results | `ResultExtensions.ToErrorString`, `ThrowIfFailed`, `ResultFailedException` |
-| Tracing | `TraceResult` / `TraceResult<T>`, `TraceScope`, `TraceResultAttributes`, endpoint records, `TracerFlushRegistry`, `TraceResultFailureRegistry`, and the FluentResults-to-`ILogger` bridge |
-| Concurrency | `Concurrency` (parallelism knobs and a throttled runner), `HandlerLockRegistry` |
-| Specifications | `SpecificationsHelper` — `And`, `Or`, `Not`, `All` over predicate expressions |
+| Mediator | `Mediator`, `IRequest<T>`, `IRequestHandler<,>`, `IRequestBehavior<,>`, and `ICommandRequest*` for commands returning no value |
+| Results | `ToErrorString`, `ThrowIfFailed`, `ResultFailedException` |
+| Tracing | `TraceResult` / `TraceResult<T>`, `TraceScope`, `TraceResultAttributes`, endpoint records, `TracerFlushRegistry`, `TraceResultFailureRegistry`, and a FluentResults-to-`ILogger` bridge |
+| Concurrency | `Concurrency`, `HandlerLockRegistry` |
+| Specifications | `SpecificationsHelper` — `And`, `Or`, `Not`, `All` |
 
-It depends only on `FluentResults` and the `Microsoft.Extensions.*.Abstractions` packages. No EF Core, no SQL client.
+## Links
 
-## Where it came from
+- [Source](https://github.com/MofonCode/MofonCode.Core)
+- [Contributing, building and releasing](https://github.com/MofonCode/MofonCode.Core/blob/main/CONTRIBUTING.md)
+- MIT licensed
 
-The code was lifted from `MarketSense/src/SharedKernel` on 2026-09-28, after MarketSense was
-sunsetted on 2026-09-20. That project held 40 files; most of them were the product's own domain
-— trading clock, supported intervals, entitlements, batch ledger, chart ranges, the news and
-market model — and stayed behind. What moved is the part that had no opinion about tickers.
-
-Three things changed on the way across, each documented at its definition:
-
-1. **`SpecificationsHelper.And` / `.Or`** were built with `Expression.Invoke`, which evaluates
-   fine in memory but cannot be translated by a relational LINQ provider — a composed
-   specification threw at query time. They now rebind parameters and merge the bodies directly.
-2. **`Concurrency.MaxDop`** was derived from `ThreadPool.GetAvailableThreads`, a live load
-   reading rather than a capacity one, so it moved between reads and collapsed toward 1 under
-   load. It now derives from `Environment.ProcessorCount` and is resolved once per process.
-3. **`JobResultFailedException`** became **`ResultFailedException`**. The original was named and
-   documented for MarketSense's job dispatcher; a shared kernel with no notion of a job should
-   not ship a type whose name asserts one.
-
-The market-data tags on `TraceResult` (`WithSymbol`, `WithMarketType`, `WithScorerVersion`) were
-dropped, along with the `ErrorLogging` folder, which was shaped by that product's admin portal.
-`TraceResult.WithTag(key, value)` is the escape hatch for a consumer's own domain tags.
-
-## Building and testing
-
-```
-dotnet build
-dotnet run --project tests/MofonCode.Core.Tests
-```
-
-`dotnet run --project` is deliberate. The test project is a Microsoft.Testing.Platform
-application, and on SDK 10.0.301 `dotnet test` reports `Zero tests ran` (exit 5) against the very
-same assembly that reports 40 passing when it runs itself. Running the test app directly is the
-platform's native execution model and is what CI uses.
-
-## Analyzer settings
-
-The build runs at `latest-recommended` with `TreatWarningsAsErrors`, and every suppression is
-listed with its reason in `Directory.Build.props` (and, for the test project, in its `.csproj`)
-rather than as a pragma in code.
-
-## Releasing
-
-Publishing is tag-driven and gated. Cut a tag and approve the deployment:
-
-```
-git tag v0.1.0
-git push github v0.1.0
-```
-
-`release.yml` derives the version from the tag, builds, tests and packs, then waits on the
-`nuget` environment's required reviewer before anything leaves the runner. The csproj `<Version>`
-is only the default for a local `dotnet pack`; the tag is what ships, so the two cannot disagree.
-
-### Trusted publishing, not an API key
-
-There is no long-lived nuget.org key stored anywhere. The publish job asks GitHub for an OIDC
-token and trades it at nuget.org for an API key that expires in an hour, against a policy
-registered on nuget.org:
-
-| Field | Value |
-|---|---|
-| Repository Owner | `MofonCode` |
-| Repository | `MofonCode.Core` |
-| Workflow File | `release.yml` (file name only, no path) |
-| Environment | `nuget` |
-| Scopes | Push new packages **and** new versions, glob `MofonCode.*` |
-
-Naming the environment in the policy is what ties the two gates together: a token minted by any
-other job in this repository — or by the same workflow outside the approved environment — does
-not satisfy the policy. The one repository secret is `NUGET_USER`, the nuget.org **profile name**
-(not an email address), which the token exchange needs to identify the account.
-
-The token is exchanged inside the gated job on purpose. The key lives one hour, and minting it
-only after approval means a review that sits overnight delays the key rather than expiring it.
-
-The first publish also permanently activates the policy: nuget.org locks it to this repository's
-and owner's numeric ids, which it learns from that first token, so the policy cannot be
-resurrected by deleting and recreating a repository of the same name.
+This code was lifted from a sunsetted internal codebase and two latent defects were fixed on the
+way across; `CONTRIBUTING.md` records which, and why.
