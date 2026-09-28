@@ -4,6 +4,10 @@ name: release
 # cutting a `v*` tag, and then someone approving the `nuget` environment. The version comes from
 # the tag rather than from the csproj, so the two cannot disagree - the csproj version is only
 # the default for local `dotnet pack`.
+#
+# There is no stored nuget.org API key. The publish job exchanges a GitHub OIDC token for an
+# API key that nuget.org issues on the spot and expires an hour later, against a trusted
+# publishing policy registered on nuget.org. See README for the policy fields.
 on:
   push:
     tags: ['v*']
@@ -67,12 +71,20 @@ jobs:
     name: publish to nuget.org
     needs: pack
     runs-on: ubuntu-latest
-    # The approval gate. Configure `nuget` in Settings > Environments with a required reviewer;
-    # this job then waits for that approval before anything leaves the runner. The API key lives
-    # on the environment, so it is unreachable from any job that has not been approved.
+
+    permissions:
+      # Lets this job ask GitHub for the OIDC token it trades for a nuget.org key. Job-level
+      # permissions replace the top-level block outright, so contents is restated here.
+      id-token: write
+      contents: read
+
+    # The approval gate. `nuget` carries a required reviewer, so this job waits before it runs.
+    # The trusted publishing policy on nuget.org names this environment too, which means an OIDC
+    # token minted by any other job in this repository will not satisfy it.
     environment:
       name: nuget
       url: https://www.nuget.org/packages/MofonCode.Core/${{ needs.pack.outputs.version }}
+
     steps:
       - uses: actions/setup-dotnet@v4
         with:
@@ -83,11 +95,21 @@ jobs:
           name: nupkg
           path: ./artifacts
 
+      # Deliberately inside the gated job. A nuget.org temporary key lives one hour, and the
+      # token is minted only once approval has been given - so an approval that sits overnight
+      # delays the key rather than expiring it.
+      - name: Exchange the OIDC token for a short-lived nuget.org key
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       # --skip-duplicate so re-running a release that already pushed is a no-op rather than a
-      # failure. nuget.org does not allow overwriting a published version in any case.
+      # failure. nuget.org does not allow overwriting a published version in any case. The
+      # matching .snupkg alongside is picked up and pushed with it.
       - name: Push
         run: >
           dotnet nuget push "./artifacts/*.nupkg"
           --source https://api.nuget.org/v3/index.json
-          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
           --skip-duplicate
