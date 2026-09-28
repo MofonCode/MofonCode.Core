@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MofonCode.Core/MofonCode.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MofonCode.Core.Tests/MofonCode.Core.Tests.csproj" />
+  </Folder>
+</Solution>

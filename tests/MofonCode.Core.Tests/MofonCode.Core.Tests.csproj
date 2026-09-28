@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <EnableMSTestRunner>true</EnableMSTestRunner>
+
+    <!-- Test-project exceptions to the solution-wide analyzer settings, listed here rather than
+         as pragmas in the tests themselves.
+         CA1707 - test names are sentences: Method_statesWhatItAsserts. The underscore is the
+                  convention that makes a failing test readable in CI output.
+         CA1861 - expected-value arrays passed inline to CollectionAssert. Hoisting each one to a
+                  static field moves the expectation away from the assertion that reads it. -->
+    <NoWarn>$(NoWarn);CA1707;CA1861</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MSTest" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/MofonCode.Core/MofonCode.Core.csproj" />
+  </ItemGroup>
+
+</Project>

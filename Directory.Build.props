@@ -1,0 +1,36 @@
+<Project>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- The package exists to keep consuming solutions in shape; it cannot ship warnings of
+         its own. WarningsNotAsErrors is deliberately empty so an exception is one visible
+         line here rather than a pragma buried in code. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors></WarningsNotAsErrors>
+
+    <!-- Every suppression is listed here, with its reason, rather than as a pragma in code.
+         CA1716 - the mediator pipeline's `next` parameter. The rule protects callers in
+                  languages where `Next` is reserved (VB). `next` is the universal name for a
+                  pipeline continuation and renaming it would make the API worse for the C#
+                  consumers this package actually has.
+         CA1000 - `TraceResult<T>.Begin(...)`. A static factory on the generic type is the whole
+                  entry point to the tracing API; the alternative is a non-generic helper that
+                  reads worse at every call site.
+         CA1848 - LoggerMessage source-generated delegates in FluentResultLogging. The logging
+                  there is on result-failure paths, not hot loops, and the messages are built
+                  from a reason graph walked at runtime. Converting is a real refactor that
+                  should be its own change, not a rider on the extraction. -->
+    <NoWarn>$(NoWarn);CA1716;CA1000;CA1848</NoWarn>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <AnalysisModeSecurity>All</AnalysisModeSecurity>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>moderate</NuGetAuditLevel>
+  </PropertyGroup>
+
+</Project>

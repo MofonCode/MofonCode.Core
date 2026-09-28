@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>MofonCode.Core</RootNamespace>
+    <AssemblyName>MofonCode.Core</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>MofonCode.Core</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>MofonCode</Authors>
+    <Company>MofonCode</Company>
+    <Description>Shared kernel for MofonCode .NET solutions: a minimal mediator, result and tracing primitives.</Description>
+    <PackageTags>mediator;cqrs;vertical-slice;fluentresults;tracing;opentelemetry</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/MofonCode/MofonCode.Core</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MofonCode/MofonCode.Core</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentResults" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
