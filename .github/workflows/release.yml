@@ -1,0 +1,93 @@
+name: release
+
+# Publishing is tag-driven and deliberate. A merge to main cannot publish: it takes someone
+# cutting a `v*` tag, and then someone approving the `nuget` environment. The version comes from
+# the tag rather than from the csproj, so the two cannot disagree - the csproj version is only
+# the default for local `dotnet pack`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: build, test and pack
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Reject a tag that is not a version before spending a build on it, and before a reviewer
+      # is asked to approve something whose name does not say what it ships.
+      - name: Derive the version from the tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '${GITHUB_REF_NAME}' is not vMAJOR.MINOR.PATCH[-prerelease]."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing version $version"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release --nologo
+
+      # The gate publishes nothing that has not passed its tests. See ci.yml for why this is not
+      # `dotnet test`.
+      - name: Test
+        run: dotnet run --project tests/MofonCode.Core.Tests --configuration Release --no-build
+
+      - name: Pack
+        run: >
+          dotnet pack src/MofonCode.Core
+          --configuration Release
+          --nologo
+          -p:Version=${{ steps.version.outputs.version }}
+          --output ./artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: ./artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish to nuget.org
+    needs: pack
+    runs-on: ubuntu-latest
+    # The approval gate. Configure `nuget` in Settings > Environments with a required reviewer;
+    # this job then waits for that approval before anything leaves the runner. The API key lives
+    # on the environment, so it is unreachable from any job that has not been approved.
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/MofonCode.Core/${{ needs.pack.outputs.version }}
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: ./artifacts
+
+      # --skip-duplicate so re-running a release that already pushed is a no-op rather than a
+      # failure. nuget.org does not allow overwriting a published version in any case.
+      - name: Push
+        run: >
+          dotnet nuget push "./artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --skip-duplicate

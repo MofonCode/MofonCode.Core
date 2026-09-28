@@ -1,0 +1,42 @@
+name: ci
+
+# ubuntu-latest, not windows. The library is net10.0 and its only dependencies are FluentResults
+# and two Microsoft.Extensions.*.Abstractions packages - nothing here touches a path separator, a
+# registry key or a native Windows component. It was lifted from a repository that did pin the
+# SQL client, but that file stayed behind with the rest of that product's infrastructure.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore
+
+      # TreatWarningsAsErrors is on solution-wide, so a warning fails here rather than reaching a
+      # consumer. Release, because that is the configuration the package is cut from.
+      - name: Build
+        run: dotnet build --no-restore --configuration Release --nologo
+
+      # NOT `dotnet test`. The test project is a Microsoft.Testing.Platform application, and on
+      # the .NET 10 SDK `dotnet test` reports "Zero tests ran" (exit 5) against the very same
+      # assembly that reports 40 passing when it runs itself. A workflow using `dotnet test` would
+      # go green having run nothing, which is worse than failing. Running the test app directly is
+      # the platform's native execution model.
+      - name: Test
+        run: dotnet run --project tests/MofonCode.Core.Tests --configuration Release --no-build
+
+      # Packing on every build keeps packaging defects - a missing README, a license expression
+      # that stopped resolving - from being discovered only at release.
+      - name: Pack
+        run: dotnet pack src/MofonCode.Core --configuration Release --no-build --nologo
