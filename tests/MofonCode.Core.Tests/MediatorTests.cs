@@ -104,7 +104,7 @@ public sealed class MediatorTests
         Result<int> result = await mediator.Send<GetNumber, int>(new GetNumber(1));
 
         Assert.IsTrue(result.IsFailed);
-        Assert.AreEqual("nope", result.ToErrorString());
+        Assert.AreEqual("nope", result.ToLogString());
     }
 
     [TestMethod]

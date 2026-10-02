@@ -6,10 +6,23 @@ namespace MofonCode.Core;
 public static class ResultExtensions
 {
     /// <summary>
-    /// Extracts a semicolon-delimited error message string from a failed result, recursively
-    /// unwrapping CausedBy reasons and exception messages.
+    /// Everything a failure knew, as one line, for a log.
     /// </summary>
-    public static string ToErrorString(this ResultBase result)
+    /// <remarks>
+    /// <para>Recursively unwraps <c>CausedBy</c> reasons and prefers an exception's own message,
+    /// which is what makes it useful in a log and wrong at a boundary: a database exception's
+    /// message names a server and a column, and a null-reference exception's names nothing a reader
+    /// can act on.</para>
+    ///
+    /// <para><strong>Named for the side of the boundary it belongs on.</strong> It was
+    /// <c>ToErrorString</c>, which said neither side — so the obvious thing to reach for at an HTTP
+    /// boundary was the one that leaks, and that is exactly what the code doing it looked like.
+    /// <see cref="ResultEnvelopeExtensions.ToUserMessage"/> is the other side, and
+    /// <see cref="ResultEnvelope"/> is what crosses.</para>
+    /// </remarks>
+    /// <param name="result">The result to describe.</param>
+    /// <returns>The joined messages, or an empty string on success.</returns>
+    public static string ToLogString(this ResultBase result)
     {
         ArgumentNullException.ThrowIfNull(result);
         return string.Join("; ", result.Errors.SelectMany(FlattenError));

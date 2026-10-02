@@ -7,7 +7,7 @@
 
   <PropertyGroup>
     <PackageId>MofonCode.Core</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.2.0</Version>
     <Authors>MofonCode</Authors>
     <Company>MofonCode</Company>
     <Description>Shared kernel for MofonCode .NET solutions: a minimal mediator, result and tracing primitives.</Description>
