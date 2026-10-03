@@ -2,20 +2,20 @@ using FluentResults;
 
 namespace MofonCode.Core.Tests;
 
-/// <summary>Covers error flattening and the result-to-exception boundary helper.</summary>
+/// <summary>Covers error flattening for a log, and the result-to-exception boundary helper.</summary>
 [TestClass]
 public sealed class ResultExtensionsTests
 {
     [TestMethod]
-    public void ToErrorString_joinsTopLevelErrors()
+    public void ToLogString_joinsTopLevelErrors()
     {
         Result result = Result.Fail("first").WithError("second");
 
-        Assert.AreEqual("first; second", result.ToErrorString());
+        Assert.AreEqual("first; second", result.ToLogString());
     }
 
     [TestMethod]
-    public void ToErrorString_unwrapsNestedReasons()
+    public void ToLogString_unwrapsNestedReasons()
     {
         Error inner = new("inner");
         Error outer = new("outer");
@@ -23,20 +23,20 @@ public sealed class ResultExtensionsTests
 
         Result result = Result.Fail(outer);
 
-        Assert.AreEqual("outer; inner", result.ToErrorString());
+        Assert.AreEqual("outer; inner", result.ToLogString());
     }
 
     [TestMethod]
-    public void ToErrorString_prefersTheExceptionMessageForExceptionalErrors()
+    public void ToLogString_prefersTheExceptionMessageForExceptionalErrors()
     {
         Result result = Result.Fail(new ExceptionalError(new InvalidOperationException("blew up")));
 
-        Assert.AreEqual("blew up", result.ToErrorString());
+        Assert.AreEqual("blew up", result.ToLogString());
     }
 
     [TestMethod]
-    public void ToErrorString_isEmptyForASuccess()
-        => Assert.AreEqual(string.Empty, Result.Ok().ToErrorString());
+    public void ToLogString_isEmptyForASuccess()
+        => Assert.AreEqual(string.Empty, Result.Ok().ToLogString());
 
     [TestMethod]
     public void ThrowIfFailed_doesNothingForASuccess()
