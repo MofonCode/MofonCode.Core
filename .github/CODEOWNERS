@@ -1,0 +1,3 @@
+# Who must approve a pull request into development or main: the rulesets require a code owner review.
+# GitHub reads this from the branch a pull request merges into, so changing it is a reviewed pull request too.
+* @peteralmanzar
