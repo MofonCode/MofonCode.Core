@@ -110,7 +110,7 @@ trades it at nuget.org for an API key that expires in an hour, against a policy 
 | Repository | `MofonCode.Core` |
 | Workflow File | `ci.yml` (file name only, no path) |
 | Environment | `nuget` on one policy, `nuget-preview` on a second, otherwise identical |
-| Scopes | Push new packages **and** new versions, glob `MofonCode.*` |
+| Package | `MofonCode.Core` exactly, not `MofonCode.*`, which would also let this repository publish `MofonCode.Sdlc.Cli` |
 
 Naming the environment in the policy is what ties the two gates together: a token minted by any
 other job in this repository — or by the same workflow outside the approved environment — does
