@@ -1,18 +1,112 @@
+# Build, test and publish MofonCode.Core: one pipeline, three ways in.
+#
+#   a pull request                     -> build and test, and keep the package as a run artifact
+#   a push to development -- a merged  -> the same, then <Version>-preview to nuget.org through
+#      pull request that ships          'nuget-preview', which waits for a reviewer, tagged v<that version>
+#   a push to main -- a merge          -> the same, then <Version> through 'nuget', which waits for a
+#                                         reviewer, tagged v<that version>
+#
+# The version is the <Version> in src/MofonCode.Core/MofonCode.Core.csproj. A preview carries no counter, so each
+# version has one, and the next preview is the next patch; a push that ships a change without moving it is
+# refused. A merge to main whose version is already published and that ships nothing -- a documentation merge --
+# publishes nothing.
+#
+# Only pushes that change what ships make a preview: the library, the README the package embeds, and the
+# build settings. A version on nuget.org can be unlisted but never deleted, so a preview per documentation
+# commit would be permanent noise. A push to development that ships nothing runs nothing here: its pull request
+# built it.
+#
+# Both branches take pull requests only: squashed into development, so one merged pull request is one preview,
+# and merged with a merge commit into main. Only development or a release/* branch may open a pull request into
+# main, which the promotion job below decides.
+#
+# ubuntu-latest, not windows. The library is net10.0 and its only dependencies are FluentResults and two
+# Microsoft.Extensions.*.Abstractions packages - nothing here touches a path separator, a registry key or a native
+# Windows component.
+#
+# No stored secret and no API key. The publish job trades a GitHub OIDC token for a nuget.org key that nuget.org
+# issues on the spot and expires an hour later, against a trusted publishing policy registered there. The policy
+# names this file and the environment, so a token minted by any other workflow or job does not satisfy it. The
+# fields are in CONTRIBUTING.md, under Releasing.
+
 name: ci
 
-# ubuntu-latest, not windows. The library is net10.0 and its only dependencies are FluentResults
-# and two Microsoft.Extensions.*.Abstractions packages - nothing here touches a path separator, a
-# registry key or a native Windows component. It was lifted from a repository that did pin the
-# SQL client, but that file stayed behind with the rest of that product's infrastructure.
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
+  push:
+    branches: [main, development]
+
+permissions:
+  contents: read
+
+# A second push to the same pull request makes the first run's answer irrelevant, so stop it rather than pay for
+# both. Never cancel a push: those runs publish, and nuget.org has no rollback.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-test:
+  # Whether a push changes what ships. A path filter on the trigger cannot say this, because main builds every
+  # merge and development only a shipping one -- and a merge that ships with a version already published is a
+  # mistake to refuse, which needs the answer as a value rather than as a skipped run.
+  changes:
+    name: what the push changes
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      ships: ${{ steps.diff.outputs.ships }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # A new branch has no previous commit, and a force push may have dropped it, so both count as shipping: the
+      # version check below then decides, which is the safe direction to be wrong in.
+      - name: Does it change what ships
+        id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            ships=true
+          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" \
+              | grep -Eq '^(src/|README\.md$|Directory\.Build\.props$|Directory\.Packages\.props$|global\.json$)'; then
+            ships=true
+          else
+            ships=false
+          fi
+          echo "ships=$ships" >> "$GITHUB_OUTPUT"
+          echo "Changes what ships: $ships"
+
+  # Only development or a release/* branch may open a pull request into main. A ruleset cannot say which branch a
+  # pull request comes from, so this job does, and main's ruleset requires it.
+  promotion:
+    name: promotion
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only development or a release branch promotes into main
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          case "$HEAD_REF" in
+            development|release/?*) echo "$HEAD_REF may promote into main." ;;
+            *) echo "::error::$HEAD_REF may not open a pull request into main. Open it into development, and promote from there or from a release/* branch."; exit 1 ;;
+          esac
+
+  build:
+    name: build, test and pack
+    needs: changes
+    if: >-
+      ${{ !cancelled() && needs.changes.result != 'failure' && (
+          github.event_name == 'pull_request'
+          || github.ref == 'refs/heads/main'
+          || needs.changes.outputs.ships == 'true') }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -20,23 +114,142 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Restore
-        run: dotnet restore
+      # Decided before anything is built.
+      - name: Decide the version
+        id: version
+        env:
+          SHIPS: ${{ needs.changes.outputs.ships }}
+        run: |
+          declared="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/MofonCode.Core/MofonCode.Core.csproj | head -n 1)"
+          if [ -z "$declared" ]; then
+            echo "::error::src/MofonCode.Core/MofonCode.Core.csproj declares no <Version>."
+            exit 1
+          fi
 
-      # TreatWarningsAsErrors is on solution-wide, so a warning fails here rather than reaching a
-      # consumer. Release, because that is the configuration the package is cut from.
+          # Whether nuget.org has a version, or a tag already names it. The tag is asked for too because it is
+          # immediate, and nuget.org's index takes minutes to list a fresh version.
+          taken() {
+            id="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+            published="$(curl -fsS https://api.nuget.org/v3-flatcontainer/mofoncode.core/index.json | grep -c "\"$id\"" || true)"
+            tagged="$(git ls-remote --tags origin "refs/tags/v$1" | wc -l)"
+            [ "$published" != "0" ] || [ "$tagged" != "0" ]
+          }
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            version="$declared"
+            publish=none
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            version="$declared"
+            if taken "$version"; then
+              if [ "$SHIPS" = "true" ]; then
+                echo "::error::$version is already published, and this merge changes what ships. Move the patch in the csproj's <Version>."
+                exit 1
+              fi
+              echo "$version is already published and this merge ships nothing, so nothing is published."
+              publish=none
+            else
+              publish=release
+            fi
+          else
+            # One preview per version, named like a release: a new preview is a new patch. Refused rather than
+            # skipped when it, or the release it would precede, is already published, so a change that forgot the
+            # bump fails where somebody looks instead of publishing nothing.
+            version="$declared-preview"
+            if taken "$version" || taken "$declared"; then
+              echo "::error::$version, or the release it previews, is already published. A preview is one per version: move the patch in the csproj's <Version>, then push."
+              exit 1
+            fi
+            publish=preview
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Building $version; publishing: $publish"
+
+      # TreatWarningsAsErrors is on solution-wide, so a warning fails here rather than reaching a consumer.
       - name: Build
-        run: dotnet build --no-restore --configuration Release --nologo
+        run: dotnet build --configuration Release --nologo -p:Version=${{ steps.version.outputs.version }}
 
-      # NOT `dotnet test`. The test project is a Microsoft.Testing.Platform application, and on
-      # the .NET 10 SDK `dotnet test` reports "Zero tests ran" (exit 5) against the very same
-      # assembly that reports 40 passing when it runs itself. A workflow using `dotnet test` would
-      # go green having run nothing, which is worse than failing. Running the test app directly is
-      # the platform's native execution model.
+      # NOT `dotnet test`. The test project is a Microsoft.Testing.Platform application, and on the .NET 10 SDK
+      # `dotnet test` reports "Zero tests ran" (exit 5) against the very same assembly that reports every test
+      # passing when it runs itself. Running the test app directly is the platform's native execution model.
       - name: Test
         run: dotnet run --project tests/MofonCode.Core.Tests --configuration Release --no-build
 
-      # Packing on every build keeps packaging defects - a missing README, a license expression
-      # that stopped resolving - from being discovered only at release.
+      # Packing on every build keeps packaging defects -- a missing README, a license expression that stopped
+      # resolving -- from being found only at release. The package packed here is the one published: the publish
+      # job downloads it rather than building again.
       - name: Pack
-        run: dotnet pack src/MofonCode.Core --configuration Release --no-build --nologo
+        run: >
+          dotnet pack src/MofonCode.Core
+          --configuration Release
+          --nologo
+          --no-build
+          -p:Version=${{ steps.version.outputs.version }}
+          --output ./artifacts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nupkg
+          path: ./artifacts/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish to nuget.org
+    needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build.outputs.publish != 'none' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      # The OIDC token traded for a nuget.org key, and the tag every published version is given. Job-level
+      # permissions replace the top-level block outright, so contents is restated.
+      id-token: write
+      contents: write
+
+    # Both carry a required reviewer, so nothing reaches nuget.org until a person approves it: a version there can
+    # be unlisted and never deleted, a preview included. The trusted publishing policies name these, one each.
+    environment:
+      name: ${{ needs.build.outputs.publish == 'preview' && 'nuget-preview' || 'nuget' }}
+      url: https://www.nuget.org/packages/MofonCode.Core/${{ needs.build.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: nupkg
+          path: ./artifacts
+
+      # Inside the gated job, so the one-hour key is minted only once a publish has been approved, and an approval
+      # left until the morning delays the key rather than expiring it.
+      - name: Trade the OIDC token for a short-lived nuget.org key
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      # --skip-duplicate, so re-running a publish that already pushed is a no-op rather than a failure. The
+      # matching .snupkg alongside is picked up and pushed with it.
+      - name: Push
+        run: >
+          dotnet nuget push "./artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --skip-duplicate
+
+      # Every published version has a tag naming the commit it was built from. A tag pushed with the workflow's
+      # own token starts no workflow -- GitHub's rule -- and this one listens for branches only besides.
+      - name: Tag the commit
+        run: |
+          tag="v${{ needs.build.outputs.version }}"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+            echo "$tag is already pushed: this is a re-run."
+          else
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "$tag"
+          fi

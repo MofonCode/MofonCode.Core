@@ -63,22 +63,40 @@ job should not ship a type whose name asserts one. And `TraceResult`'s `WithSymb
 `WithMarketType` and `WithScorerVersion` were dropped in favour of a generic `WithTag`, so a
 consumer names its own domain tags.
 
+## Branches and pull requests
+
+Both branches take pull requests only, and nothing is pushed straight to either. Work happens on
+a branch of your own, **squashed into `development`** by pull request; `development` is **merged
+into `main` with a merge commit**, so the two keep sharing history and the next promotion carries
+only what is new. Only `development` or a `release/*` branch may open a pull request into `main`,
+which the `promotion` job checks.
+
+The rulesets are in **Settings > Rules**: `build, test and pack` required on both, `promotion` on
+`main` too, and one approval from a code owner, named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
+GitHub never counts an author's own approval, so the one bypass is the `owners` team, on pull
+requests only: a member merges their own pull request by ticking the bypass box, **and only once
+the checks are green**, because the same box would merge past them. Nobody bypasses a push.
+
 ## Releasing
 
-Publishing is tag-driven and gated:
+**A release is a merge.** `ci.yml` is the one pipeline:
 
-```
-git tag v0.1.1
-git push github v0.1.1
-```
+| What | Does |
+|---|---|
+| a pull request | builds, tests and packs, and keeps the package as a run artifact for seven days |
+| a merge into `development` that ships | publishes `<Version>-preview` through the `nuget-preview` environment, once its reviewer approves, and tags the commit `v<that version>` |
+| a merge into `main` | publishes `<Version>` through the `nuget` environment, once its reviewer approves, and tags the commit |
 
-`release.yml` derives the version from the tag, builds, tests and packs, then waits on the
-`nuget` environment's required reviewer before anything leaves the runner. The csproj `<Version>`
-is only the default for a local `dotnet pack`; the tag is what ships, so the two cannot disagree.
-A tag that is not `vMAJOR.MINOR.PATCH[-prerelease]` is rejected before the build runs.
+The version is the `<Version>` in `src/MofonCode.Core/MofonCode.Core.csproj`. **There is one
+preview per version**: the next preview is the next patch, so a pull request into `development`
+that changes what ships moves the patch, and a merge that forgets is refused rather than skipped.
+What ships is `src/`, the `README.md` the package embeds, and the build settings
+(`Directory.Build.props`, `Directory.Packages.props`, `global.json`); a merge touching none of
+them publishes nothing, because a nuget.org version can be unlisted and never deleted. A merge into
+`main` whose version is already published and that ships nothing publishes nothing; one that does
+ship is refused.
 
-Because `README.md` is embedded in the package, a change to it reaches nuget.org only on the next
-release.
+Because `README.md` is embedded in the package, a change to it is a change that ships.
 
 ### Trusted publishing, not an API key
 
@@ -90,8 +108,8 @@ trades it at nuget.org for an API key that expires in an hour, against a policy 
 | Policy owner | `MofonCode` (nuget.org organization) |
 | Repository Owner | `MofonCode` |
 | Repository | `MofonCode.Core` |
-| Workflow File | `release.yml` (file name only, no path) |
-| Environment | `nuget` |
+| Workflow File | `ci.yml` (file name only, no path) |
+| Environment | `nuget` on one policy, `nuget-preview` on a second, otherwise identical |
 | Scopes | Push new packages **and** new versions, glob `MofonCode.*` |
 
 Naming the environment in the policy is what ties the two gates together: a token minted by any
